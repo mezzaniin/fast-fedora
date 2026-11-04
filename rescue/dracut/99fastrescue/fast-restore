@@ -1,0 +1,362 @@
+#!/bin/bash
+# FAST Rescue – stellt ein komplettes Fedora-System aus einem Borg-Backup wieder her.
+# Läuft im Initramfs (aus dem RAM), gestartet über den Bootmenü-Eintrag „FAST Rescue“.
+#
+# Archiv-Aufbau (siehe fast-backup):  root/ home/ boot/ efi/
+#   root -> btrfs-Subvolume "root" (/),  home -> Subvolume "home" (/home)
+#   boot -> ext4 /boot,                  efi  -> vfat /boot/efi
+
+set -u
+CONF=/etc/fast-rescue.conf
+# shellcheck source=/dev/null
+. "$CONF"
+# nur in Test-Builds vorhanden (bindet z. B. ein lokales Test-Repo ein)
+# shellcheck source=/dev/null
+[ -f /etc/fast-rescue-test.sh ] && . /etc/fast-rescue-test.sh
+
+export BORG_REPO="$REPO"
+export BORG_RSH="ssh -i /etc/fast-rescue/id_rescue -o BatchMode=yes -o UserKnownHostsFile=/etc/fast-rescue/known_hosts -o StrictHostKeyChecking=yes -o ConnectTimeout=15 -o ServerAliveInterval=30"
+export BORG_BASE_DIR=/run/fast-rescue/borg
+export BORG_RELOCATED_REPO_ACCESS_IS_OK=yes
+export BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK=no
+export TMPDIR=/run/fast-rescue/tmp
+export HOME=/root
+export TERM=linux
+mkdir -p "$BORG_BASE_DIR" "$TMPDIR" /mnt/top /mnt/boot /mnt/efi
+BORG=/usr/bin/borg
+LOG=/run/fast-rescue/restore.log
+TODAY=$(date +%Y%m%d-%H%M)
+
+R=$'\e[31m'; G=$'\e[32m'; Y=$'\e[33m'; B=$'\e[1m'; N=$'\e[0m'
+
+banner() {
+    clear
+    echo "${B}════════════════════════════════════════════════════════════════${N}"
+    echo "${B}  FAST Rescue – System aus Backup wiederherstellen${N}"
+    echo "${B}════════════════════════════════════════════════════════════════${N}"
+    echo
+}
+info()  { echo "${G}✔${N} $*"; echo "[ok] $*" >>"$LOG"; }
+warn()  { echo "${Y}!${N} $*"; echo "[warn] $*" >>"$LOG"; }
+fail()  { echo "${R}✘ $*${N}"; echo "[fail] $*" >>"$LOG"; }
+pause() { read -r -p "Weiter mit Enter … " _; }
+
+menu_end() {
+    echo
+    echo "  [n] Neu starten   [s] Shell (Experten)   [w] Wiederholen"
+    read -r -p "Auswahl: " a
+    case "$a" in
+        s|S) echo "Shell – mit 'exit' zurück zum Menü."; bash -i; return 0 ;;
+        w|W) return 0 ;;
+        *) do_reboot ;;
+    esac
+}
+
+do_reboot() {
+    echo "Starte neu …"
+    sync
+    # nur in Test-Builds definiert
+    declare -F fast_test_verify >/dev/null && fast_test_verify
+    umount -R /mnt/top /mnt/boot /mnt/efi 2>/dev/null
+    [ -e /dev/mapper/fastroot ] && cryptsetup close fastroot 2>/dev/null
+    sleep 2
+    systemctl --no-block reboot 2>/dev/null || reboot -f
+    sleep 30
+    echo b >/proc/sysrq-trigger
+}
+
+# ------------------------------------------------------------------ Netzwerk
+iface_by_mac() {
+    local d
+    for d in /sys/class/net/*; do
+        [ "$(cat "$d/address" 2>/dev/null)" = "${NET_MAC,,}" ] && { basename "$d"; return; }
+    done
+    # Fallback: erste Ethernet-Schnittstelle mit Kabel
+    for d in /sys/class/net/e*; do [ -e "$d" ] && { basename "$d"; return; }; done
+}
+
+setup_network() {
+    [ "$REPO" = "${REPO#ssh://}" ] && return 0   # lokales Repo (Test)
+    local ifc i
+    ifc=$(iface_by_mac)
+    if [ -z "$ifc" ]; then
+        fail "Keine Netzwerkkarte gefunden."
+        return 1
+    fi
+    ip link set lo up
+    ip link set "$ifc" up
+    echo -n "Warte auf Netzwerkkabel an $ifc "
+    for i in $(seq 1 20); do
+        [ "$(cat /sys/class/net/"$ifc"/carrier 2>/dev/null)" = 1 ] && break
+        echo -n "."; sleep 1
+    done
+    echo
+    ip addr flush dev "$ifc" 2>/dev/null
+    ip addr add "$NET_ADDR" dev "$ifc"
+    ip route replace default via "$NET_GW" dev "$ifc"
+    echo "nameserver ${NET_DNS:-$NET_GW}" >/etc/resolv.conf
+    for i in $(seq 1 10); do
+        if ping -c1 -W1 "$REPO_HOST" >/dev/null 2>&1 || \
+           timeout 3 bash -c "exec 3<>/dev/tcp/$REPO_HOST/22" 2>/dev/null; then
+            info "Netzwerk bereit ($ifc, $NET_ADDR) – Backup-Server $REPO_HOST erreichbar"
+            return 0
+        fi
+        sleep 1
+    done
+    fail "Backup-Server $REPO_HOST ist nicht erreichbar (Kabel? Unraid an?)."
+    return 1
+}
+
+# ------------------------------------------------------------------ Repo
+ask_passphrase() {
+    local n
+    for n in 1 2 3; do
+        read -r -s -p "Backup-Passwort: " BORG_PASSPHRASE; echo
+        export BORG_PASSPHRASE
+        echo "Lade Liste der Backups …"
+        if ARCHIVES=$("$BORG" list --short --sort-by timestamp 2>"$TMPDIR/err"); then
+            return 0
+        fi
+        if grep -qi "passphrase" "$TMPDIR/err"; then
+            fail "Falsches Passwort."
+        else
+            fail "Fehler beim Zugriff auf das Backup:"; tail -5 "$TMPDIR/err"
+            return 1
+        fi
+    done
+    return 1
+}
+
+choose_archive() {
+    mapfile -t LIST < <(echo "$ARCHIVES" | grep . | tac)
+    if [ "${#LIST[@]}" -eq 0 ]; then
+        fail "Im Repository ist noch kein Backup vorhanden."
+        return 1
+    fi
+    echo
+    echo "${B}Verfügbare Backups (neuestes zuerst):${N}"
+    local i
+    for i in "${!LIST[@]}"; do
+        printf "  [%2d] %s\n" "$((i + 1))" "${LIST[$i]}"
+    done
+    echo "  [ 0] Abbrechen"
+    echo
+    read -r -p "Welches Backup wiederherstellen? [1]: " n
+    n=${n:-1}
+    [[ "$n" =~ ^[0-9]+$ ]] || return 1
+    [ "$n" -eq 0 ] && return 1
+    ARCHIVE=${LIST[$((n - 1))]:-}
+    [ -n "$ARCHIVE" ]
+}
+
+# ------------------------------------------------------------------ Datenträger
+dev_by_uuid() { blkid -U "$1" 2>/dev/null; }
+
+open_root_device() {
+    ROOTDEV=$(dev_by_uuid "$ROOT_UUID")
+    if [ -z "$ROOTDEV" ] && [ -n "${LUKS_UUID:-}" ]; then
+        local luks
+        luks=$(dev_by_uuid "$LUKS_UUID")
+        if [ -n "$luks" ]; then
+            echo "Die Systempartition ist verschlüsselt (LUKS)."
+            cryptsetup open "$luks" fastroot || return 1
+            udevadm settle
+            ROOTDEV=/dev/mapper/fastroot
+        fi
+    fi
+    if [ -z "$ROOTDEV" ] && [ -n "${ROOT_PART:-}" ] && [ -b "$ROOT_PART" ]; then
+        ROOTDEV=$ROOT_PART
+    fi
+    [ -n "$ROOTDEV" ]
+}
+
+extract_to() {   # $1 = Archiv-Ordner (root|home|boot|efi), $2 = Ziel
+    local rc
+    echo "  → stelle ${B}$1${N} nach $2 wieder her …"
+    ( cd "$2" && "$BORG" extract --sparse --strip-components 1 "::$ARCHIVE" "$1" ) \
+        >>"$LOG" 2>"$TMPDIR/extract.err"
+    rc=$?
+    if [ $rc -gt 1 ]; then
+        tail -5 "$TMPDIR/extract.err"
+        fail "Wiederherstellung von $1 fehlgeschlagen (rc=$rc)."
+        return 1
+    fi
+    [ $rc -eq 1 ] && warn "$1: mit Warnungen (Details: $LOG)"
+    cat "$TMPDIR/extract.err" >>"$LOG"
+    return 0
+}
+
+restore_efi() {
+    local dev
+    dev=$(dev_by_uuid "$EFI_UUID")
+    if [ -z "$dev" ] || ! mount -t vfat "$dev" /mnt/efi 2>/dev/null; then
+        if [ -n "${EFI_PART:-}" ] && [ -b "$EFI_PART" ]; then
+            warn "EFI-Partition defekt – wird neu formatiert."
+            mkfs.vfat -F 32 -i "${EFI_UUID//-/}" "$EFI_PART" >>"$LOG" 2>&1 || return 1
+            mount -t vfat "$EFI_PART" /mnt/efi || return 1
+        else
+            fail "EFI-Partition nicht gefunden."; return 1
+        fi
+    fi
+    extract_to efi /mnt/efi || return 1
+    umount /mnt/efi
+    info "EFI-Partition wiederhergestellt"
+}
+
+restore_boot() {
+    local dev keep=/run/fast-rescue/keep
+    dev=$(dev_by_uuid "$BOOT_UUID")
+    mkdir -p "$keep"
+    if [ -n "$dev" ] && mount -t ext4 "$dev" /mnt/boot 2>/dev/null; then
+        # Rettungssystem selbst aufheben
+        [ -d /mnt/boot/fast-rescue ] && cp -a /mnt/boot/fast-rescue "$keep/" 2>/dev/null
+        cp -a /mnt/boot/loader/entries/*fast-rescue*.conf "$keep/" 2>/dev/null
+        find /mnt/boot -mindepth 1 -maxdepth 1 ! -name lost+found ! -name fast-rescue \
+            ! -name efi -exec rm -rf {} +
+    elif [ -n "${BOOT_PART:-}" ] && [ -b "$BOOT_PART" ]; then
+        warn "/boot defekt – wird neu formatiert."
+        mkfs.ext4 -F -q -U "$BOOT_UUID" "$BOOT_PART" >>"$LOG" 2>&1 || return 1
+        mount -t ext4 "$BOOT_PART" /mnt/boot || return 1
+    else
+        fail "/boot-Partition nicht gefunden."; return 1
+    fi
+    mkdir -p /mnt/boot/efi
+    extract_to boot /mnt/boot || return 1
+    if [ -d "$keep/fast-rescue" ] && [ ! -d /mnt/boot/fast-rescue ]; then
+        cp -a "$keep/fast-rescue" /mnt/boot/
+    fi
+    mkdir -p /mnt/boot/loader/entries
+    cp -a "$keep"/*fast-rescue*.conf /mnt/boot/loader/entries/ 2>/dev/null
+    umount /mnt/boot
+    info "/boot wiederhergestellt"
+}
+
+restore_btrfs() {
+    local fresh=0 sub
+    if ! mount -t btrfs -o subvolid=5 "$ROOTDEV" /mnt/top 2>>"$LOG"; then
+        warn "Das btrfs-Dateisystem lässt sich nicht einhängen (beschädigt)."
+        read -r -p "Komplett neu formatieren? Alle Daten darauf gehen verloren [ja/NEIN]: " a
+        [ "$a" = "ja" ] || return 1
+        mkfs.btrfs -f -q -U "$ROOT_UUID" -L "$ROOT_LABEL" "$ROOTDEV" >>"$LOG" 2>&1 || return 1
+        mount -t btrfs -o subvolid=5 "$ROOTDEV" /mnt/top || return 1
+        fresh=1
+    fi
+    local T=/mnt/top
+    for sub in "$SUBVOL_ROOT" "$SUBVOL_HOME"; do
+        [ -e "$T/$sub.fast-new" ] && btrfs subvolume delete -R "$T/$sub.fast-new" >>"$LOG" 2>&1
+        btrfs subvolume create "$T/$sub.fast-new" >>"$LOG" 2>&1 || return 1
+    done
+    extract_to root "$T/$SUBVOL_ROOT.fast-new" || return 1
+    extract_to home "$T/$SUBVOL_HOME.fast-new" || return 1
+
+    # Nicht gesicherte Ordner (z. B. Steam-Spiele) aus dem alten /home übernehmen –
+    # per Reflink, das kostet weder Zeit noch Platz.
+    if [ $fresh -eq 0 ] && [ -d "$T/$SUBVOL_HOME" ]; then
+        local p src dst
+        for p in "${CARRY_OVER[@]}"; do
+            for src in $T/$SUBVOL_HOME/$p; do
+                [ -d "$src" ] || continue
+                dst="$T/$SUBVOL_HOME.fast-new/${src#"$T/$SUBVOL_HOME/"}"
+                mkdir -p "$(dirname "$dst")"
+                rm -rf "$dst"
+                if cp -a --reflink=always "$src" "$dst" 2>>"$LOG"; then
+                    info "übernommen: ${src#"$T/$SUBVOL_HOME/"}"
+                else
+                    warn "konnte nicht übernommen werden: ${src#"$T/$SUBVOL_HOME/"}"
+                fi
+            done
+        done
+    fi
+
+    # Snapper erwartet /.snapshots als eigenes Subvolume
+    if [ -d "$T/$SUBVOL_ROOT.fast-new/.snapshots" ] && \
+       [ -z "$(ls -A "$T/$SUBVOL_ROOT.fast-new/.snapshots")" ]; then
+        rmdir "$T/$SUBVOL_ROOT.fast-new/.snapshots"
+        btrfs subvolume create "$T/$SUBVOL_ROOT.fast-new/.snapshots" >>"$LOG" 2>&1
+        chmod 750 "$T/$SUBVOL_ROOT.fast-new/.snapshots"
+    fi
+
+    # Umschalten: alt -> *.vor-restore-DATUM, neu -> aktiv
+    for sub in "$SUBVOL_ROOT" "$SUBVOL_HOME"; do
+        if [ -e "$T/$sub" ]; then
+            mv "$T/$sub" "$T/$sub.vor-restore-$TODAY" || return 1
+        fi
+        mv "$T/$sub.fast-new" "$T/$sub" || return 1
+    done
+    sync
+    umount /mnt/top
+    info "System und /home wiederhergestellt"
+    [ $fresh -eq 0 ] && info "Alter Stand aufgehoben als $SUBVOL_ROOT.vor-restore-$TODAY / $SUBVOL_HOME.vor-restore-$TODAY"
+    return 0
+}
+
+cleanup_old_copies() {
+    mount -t btrfs -o subvolid=5 "$ROOTDEV" /mnt/top 2>/dev/null || return 0
+    mapfile -t OLD < <(ls -d /mnt/top/*.vor-restore-* 2>/dev/null)
+    if [ "${#OLD[@]}" -gt 0 ]; then
+        echo
+        warn "Es gibt noch Sicherungskopien früherer Wiederherstellungen:"
+        printf "     %s\n" "${OLD[@]#/mnt/top/}"
+        read -r -p "Diese jetzt löschen, um Platz zu schaffen? [j/N]: " a
+        if [ "$a" = "j" ] || [ "$a" = "J" ]; then
+            local o
+            for o in "${OLD[@]}"; do
+                btrfs subvolume delete -R "$o" >>"$LOG" 2>&1 && info "gelöscht: ${o#/mnt/top/}"
+            done
+        fi
+    fi
+    df -h /mnt/top | tail -1 | awk '{print "  Freier Platz auf dem System-Laufwerk: " $4}'
+    umount /mnt/top
+}
+
+# ------------------------------------------------------------------ Ablauf
+main() {
+    plymouth quit 2>/dev/null
+    udevadm settle 2>/dev/null
+    : >"$LOG"
+    while true; do
+        banner
+        echo "Dieses Programm setzt Fedora komplett auf den Stand eines Backups zurück:"
+        echo "System (/), persönliche Dateien (/home), /boot und die EFI-Partition."
+        echo "Der aktuelle Stand wird nicht gelöscht, sondern als Kopie aufgehoben."
+        echo
+        setup_network || { menu_end; continue; }
+        ask_passphrase || { menu_end; continue; }
+        choose_archive || { menu_end; continue; }
+        open_root_device || { fail "System-Laufwerk (UUID $ROOT_UUID) nicht gefunden."; menu_end; continue; }
+
+        banner
+        echo "Gewählt: ${B}$ARCHIVE${N}"
+        "$BORG" info "::$ARCHIVE" 2>/dev/null | awk '
+            /^Time \(start\)/ { sub(/^Time \(start\): */, ""); print "  Erstellt:      " $0 }
+            /^Number of files/ { print "  Dateien:       " $NF }
+            /^This archive:/   { print "  Größe:         " $3 " " $4 " (Original)" }'
+        cleanup_old_copies
+        echo
+        echo "${R}${B}Achtung:${N} Das System wird auf den Stand von ${B}$ARCHIVE${N} gesetzt."
+        echo "Alles, was seitdem geändert wurde, ist danach nur noch in der aufgehobenen Kopie."
+        echo
+        read -r -p "Zum Fortfahren WIEDERHERSTELLEN eintippen: " a
+        [ "$a" = "WIEDERHERSTELLEN" ] || { warn "Abgebrochen."; menu_end; continue; }
+
+        echo
+        local start=$SECONDS
+        if restore_btrfs && restore_boot && restore_efi; then
+            local dur=$(( (SECONDS - start) / 60 ))
+            echo
+            info "${B}Wiederherstellung abgeschlossen${N} (${dur} min)."
+            echo "Der Rechner startet in 15 Sekunden neu (Enter = sofort, s = Shell)."
+            read -r -t 15 a
+            [ "${a:-}" = "s" ] && bash -i
+            do_reboot
+        else
+            echo
+            fail "Die Wiederherstellung ist fehlgeschlagen. Protokoll: $LOG"
+            echo "Das alte System wurde nur umbenannt, falls es schon so weit war –"
+            echo "nichts wurde gelöscht. Details zeigt: less $LOG"
+            menu_end
+        fi
+    done
+}
+
+main "$@"

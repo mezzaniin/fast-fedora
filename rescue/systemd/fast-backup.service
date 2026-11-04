@@ -1,0 +1,12 @@
+[Unit]
+Description=FAST Backup – komplettes System-Backup nach Unraid
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/fast/fast-backup
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+SuccessExitStatus=1

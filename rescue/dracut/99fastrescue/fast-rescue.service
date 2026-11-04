@@ -1,0 +1,19 @@
+[Unit]
+Description=FAST Rescue – Wiederherstellungsprogramm
+After=basic.target systemd-udev-settle.service systemd-vconsole-setup.service
+Wants=systemd-udev-settle.service
+DefaultDependencies=no
+
+[Service]
+Type=simple
+Environment=HOME=/root
+ExecStart=/usr/bin/fast-restore
+StandardInput=tty-force
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+KillMode=process
+Restart=always
+RestartSec=1

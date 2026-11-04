@@ -148,6 +148,11 @@ FAST_NO_ROOT=1 python3 tests/smoke_test.py
 - **Nur Bildschirm:** Es gibt keine Text-Oberfläche (ncurses) wie bei YaST.
   Für Server ohne Bildschirm eignet sich Cockpit besser.
 
+## Backup und Wiederherstellung
+
+Komplett-Backup nach Unraid plus Rettungssystem im Bootmenü: siehe
+[rescue/README.md](rescue/README.md).
+
 ## Lizenz
 
 MIT

@@ -1,0 +1,5 @@
+[Unit]
+Description=FAST Rescue – Systemwiederherstellung
+Requires=basic.target fast-rescue.service
+After=basic.target fast-rescue.service
+AllowIsolate=yes

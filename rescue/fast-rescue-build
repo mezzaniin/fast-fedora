@@ -1,0 +1,44 @@
+#!/bin/bash
+# Baut das FAST-Rettungssystem nach /boot/fast-rescue und legt den Bootmenü-Eintrag an.
+set -euo pipefail
+KVER=${1:-$(uname -r)}
+DEST=/boot/fast-rescue
+ENTRY=/boot/loader/entries/fast-rescue.conf
+[ $EUID -eq 0 ] || { echo "Bitte als root ausführen."; exit 1; }
+[ -s "/lib/modules/$KVER/vmlinuz" ] || { echo "Kernel $KVER nicht gefunden."; exit 1; }
+
+mkdir -p "$DEST"
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+echo "Baue Rettungssystem mit Kernel $KVER …"
+dracut --quiet --force --hostonly --no-hostonly-cmdline --no-hostonly-i18n \
+    --add "fastrescue" \
+    --omit "plymouth resume nfs iscsi multipath fcoe fcoe-uefi lvm mdraid dmraid nvdimm dbus-broker dbus network-manager" \
+    --compress zstd --kver "$KVER" "$TMP/initramfs.img"
+install -m 0644 "/lib/modules/$KVER/vmlinuz" "$TMP/vmlinuz"
+mv -f "$TMP/vmlinuz" "$DEST/vmlinuz"
+mv -f "$TMP/initramfs.img" "$DEST/initramfs.img"
+echo "$KVER" >"$DEST/kernel-version"
+command -v restorecon >/dev/null && restorecon -R "$DEST" || true
+
+KEYMAP=$(sed -n 's/^KEYMAP=//p' /etc/vconsole.conf 2>/dev/null | tr -d '"')
+cat >"$ENTRY" <<EOT
+title FAST Rescue – System aus Backup wiederherstellen
+version 0-fast-rescue
+linux /fast-rescue/vmlinuz
+initrd /fast-rescue/initramfs.img
+options rd.systemd.unit=fast-rescue.target rd.plymouth=0 plymouth.enable=0 vconsole.keymap=${KEYMAP:-de} console=tty1 loglevel=3 rd.udev.log_level=3 systemd.show_status=error
+grub_users \$grub_users
+grub_arg --unrestricted
+grub_class fedora
+EOT
+command -v restorecon >/dev/null && restorecon "$ENTRY" || true
+
+# Bootmenü bei jedem Start anzeigen (Fedora versteckt es sonst)
+grub2-editenv - unset menu_auto_hide 2>/dev/null || true
+if grep -q '^GRUB_TIMEOUT=0' /etc/default/grub 2>/dev/null; then
+    sed -i 's/^GRUB_TIMEOUT=0$/GRUB_TIMEOUT=5/' /etc/default/grub
+    grub2-mkconfig -o /boot/grub2/grub.cfg >/dev/null 2>&1 || true
+fi
+du -sh "$DEST"
+echo "Fertig: Eintrag „FAST Rescue“ ist im Bootmenü."

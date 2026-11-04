@@ -1,0 +1,25 @@
+# Ausschlüsse für fast-backup (borg, Pfade relativ: root/ home/ boot/ efi/)
+# --- System ---
+fm:root/tmp/*
+fm:root/var/tmp/*
+fm:root/var/cache/dnf/*
+fm:root/var/cache/libdnf5/*
+fm:root/var/cache/PackageKit/*
+fm:root/var/lib/systemd/coredump/*
+fm:root/var/log/journal/*
+fm:root/.fast-backup/*
+fm:root/swapfile
+# --- /boot: das Rettungssystem selbst wird nicht gesichert ---
+fm:boot/fast-rescue
+# --- Home: Caches, Papierkorb ---
+fm:home/*/.cache
+fm:home/*/.local/share/Trash
+fm:home/*/.var/app/*/cache
+# --- Steam-Spiele (lassen sich neu laden; Spielstände/compatdata bleiben drin) ---
+fm:home/*/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common
+fm:home/*/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/shadercache
+fm:home/*/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/downloading
+fm:home/*/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/temp
+fm:home/*/.local/share/Steam/steamapps/common
+fm:home/*/.local/share/Steam/steamapps/shadercache
+fm:home/*/.local/share/Steam/steamapps/downloading

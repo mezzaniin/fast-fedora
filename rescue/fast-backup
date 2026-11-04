@@ -1,0 +1,110 @@
+#!/bin/bash
+# FAST Backup – komplettes System-Backup (Snapshot) nach Borg auf Unraid.
+# Gestartet von fast-backup.timer (montags 14:00) oder manuell: sudo fast-backup
+#
+# Archiv-Aufbau:  root/  (btrfs-Snapshot von /)     home/ (Snapshot von /home)
+#                 boot/  (/boot, ext4)              efi/  (/boot/efi, vfat)
+
+set -uo pipefail
+CONF=/etc/fast-backup/config
+# shellcheck source=/dev/null
+. "$CONF"
+
+STATE=/var/lib/fast-backup
+WORK=/.fast-backup
+LOG="$STATE/last.log"
+mkdir -p "$STATE/meta"
+exec 9>/run/fast-backup.lock
+flock -n 9 || { echo "Backup läuft bereits."; exit 0; }
+
+export BORG_REPO="$REPO"
+export BORG_PASSCOMMAND="cat /etc/fast-backup/passphrase"
+export BORG_RSH="ssh -i /etc/fast-backup/id_backup -o BatchMode=yes -o UserKnownHostsFile=/etc/fast-backup/known_hosts -o StrictHostKeyChecking=yes -o ServerAliveInterval=30"
+export BORG_BASE_DIR="$STATE/borg"
+BORG=/usr/libexec/fast/borg
+HOST=$(hostname -s)
+ARCHIVE="${HOST}-$(date +%Y-%m-%d_%H-%M)"
+
+telegram() {
+    [ -n "${TELEGRAM_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT:-}" ] || return 0
+    curl -s -m 20 -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+        -d chat_id="$TELEGRAM_CHAT" --data-urlencode text="$1" >/dev/null || true
+}
+
+status() {   # $1=ok|warn|error  $2=Text
+    printf '{"time":"%s","result":"%s","archive":"%s","message":%s}\n' \
+        "$(date -Iseconds)" "$1" "$ARCHIVE" "$(printf '%s' "$2" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')" \
+        >"$STATE/status.json"
+}
+
+cleanup() {
+    umount "$WORK/boot" 2>/dev/null
+    umount "$WORK/efi" 2>/dev/null
+    for s in root home; do
+        [ -d "$WORK/$s" ] && btrfs subvolume delete "$WORK/$s" >/dev/null 2>&1
+    done
+}
+trap cleanup EXIT
+
+exec > >(tee "$LOG") 2>&1
+echo "== FAST Backup $ARCHIVE – $(date)"
+START=$SECONDS
+
+# Rettungssystem vorhanden? Sonst neu bauen.
+if [ ! -s /boot/fast-rescue/initramfs.img ] || [ ! -s /boot/loader/entries/fast-rescue.conf ]; then
+    echo "-- Rettungssystem fehlt, wird neu gebaut"
+    /usr/libexec/fast/fast-rescue-build || echo "!! Rettungssystem konnte nicht gebaut werden"
+fi
+
+# Server erreichbar? (Bis zu 10 Minuten warten, z. B. direkt nach dem Hochfahren)
+for i in $(seq 1 20); do
+    timeout 5 bash -c "exec 3<>/dev/tcp/$REPO_HOST/22" 2>/dev/null && break
+    [ "$i" -eq 20 ] && {
+        status error "Backup-Server $REPO_HOST nicht erreichbar"
+        telegram "❌ Fedora-Backup ($HOST): Backup-Server $REPO_HOST nicht erreichbar. Nächster Versuch beim nächsten Start bzw. Montag."
+        exit 2
+    }
+    sleep 30
+done
+
+telegram "⏳ Fedora-Backup ($HOST) gestartet: $ARCHIVE"
+
+# Systeminformationen für die Wiederherstellung (landen im Snapshot)
+rpm -qa --qf '%{NAME}\n' | sort >"$STATE/meta/rpm-all.txt"
+dnf5 -q repoquery --userinstalled --qf '%{name}\n' 2>/dev/null | sort >"$STATE/meta/rpm-userinstalled.txt"
+flatpak list --app --columns=application,origin,installation >"$STATE/meta/flatpak.txt" 2>/dev/null
+lsblk -o NAME,SIZE,FSTYPE,UUID,LABEL,MOUNTPOINTS >"$STATE/meta/lsblk.txt"
+cp /etc/fstab "$STATE/meta/fstab"
+
+# Snapshots anlegen (konsistenter Stand)
+cleanup
+mkdir -p "$WORK/boot" "$WORK/efi"
+btrfs subvolume snapshot -r / "$WORK/root" >/dev/null || { status error "Snapshot / fehlgeschlagen"; telegram "❌ Fedora-Backup ($HOST): Snapshot von / fehlgeschlagen"; exit 2; }
+btrfs subvolume snapshot -r /home "$WORK/home" >/dev/null || { status error "Snapshot /home fehlgeschlagen"; telegram "❌ Fedora-Backup ($HOST): Snapshot von /home fehlgeschlagen"; exit 2; }
+mount --bind -o ro /boot "$WORK/boot"
+mount --bind -o ro /boot/efi "$WORK/efi"
+
+cd "$WORK" || exit 2
+nice -n 10 ionice -c2 -n7 "$BORG" create --stats --one-file-system --numeric-ids \
+    --compression zstd,6 --checkpoint-interval 600 \
+    --exclude-caches --exclude-from /etc/fast-backup/excludes \
+    "::$ARCHIVE" root home boot efi
+RC=$?
+cd /
+
+DUR=$(( (SECONDS - START) / 60 ))
+STATS=$(grep -E "^(This archive|All archives):" "$LOG" | head -2 | sed 's/  */ /g')
+case $RC in
+    0) status ok "$STATS"
+       telegram "✅ Fedora-Backup ($HOST) erfolgreich in ${DUR} min
+Archiv: $ARCHIVE
+$STATS" ;;
+    1) status warn "$STATS"
+       telegram "⚠️ Fedora-Backup ($HOST) mit Warnungen fertig (${DUR} min)
+Archiv: $ARCHIVE
+$(grep -iE "warning|permission|changed" "$LOG" | tail -5)" ;;
+    *) status error "borg rc=$RC"
+       telegram "❌ Fedora-Backup ($HOST) FEHLGESCHLAGEN (rc=$RC)
+$(tail -n 8 "$LOG")" ;;
+esac
+exit $RC
