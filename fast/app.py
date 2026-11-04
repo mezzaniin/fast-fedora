@@ -123,12 +123,19 @@ class Window(Adw.ApplicationWindow):
     def _overview(self):
         page = Adw.PreferencesPage()
         intro = Adw.PreferencesGroup()
-        status = Adw.StatusPage(icon_name="preferences-system-symbolic",
-                                title="Systemverwaltung",
-                                description="Alle Einstellungen deines Fedora-Systems an "
-                                            "einem Ort. Wähle ein Modul aus.")
-        status.add_css_class("compact")
-        intro.add(status)
+        head = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6,
+                       halign=Gtk.Align.CENTER)
+        head.set_margin_top(18)
+        head.set_margin_bottom(6)
+        head.append(Gtk.Image(icon_name=APP_ID, pixel_size=96))
+        title = Gtk.Label(label="Systemverwaltung")
+        title.add_css_class("title-1")
+        head.append(title)
+        sub = Gtk.Label(label="Alle Einstellungen deines Fedora-Systems an einem Ort. "
+                              "Wähle ein Modul aus.", wrap=True, justify=Gtk.Justification.CENTER)
+        sub.add_css_class("dim-label")
+        head.append(sub)
+        intro.add(head)
         page.add(intro)
         for cat, _icon in CATEGORIES:
             mods = [m for m in self.modules if m.category == cat]
@@ -221,6 +228,13 @@ class App(Adw.Application):
         self.add_action(about)
 
     def do_activate(self):
+        # Beim Start aus dem Quellordner das mitgelieferte Icon finden
+        import os
+        from gi.repository import Gdk
+        icons = os.path.join(os.path.dirname(__file__), "..", "data", "icons")
+        display = Gdk.Display.get_default()
+        if os.path.isdir(icons) and display is not None:
+            Gtk.IconTheme.get_for_display(display).add_search_path(os.path.abspath(icons))
         Gtk.Window.set_default_icon_name(APP_ID)
         win = self.props.active_window or Window(self, self.start_module)
         win.present()
