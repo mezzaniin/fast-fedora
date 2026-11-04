@@ -9,6 +9,8 @@ Standardwerkzeuge von Fedora (dnf5, systemd, NetworkManager, firewalld,
 grubby, …). Was du in FAST änderst, siehst du deshalb genauso in der
 Kommandozeile und in den GNOME-Einstellungen.
 
+<img width="1552" height="1042" alt="image" src="https://github.com/user-attachments/assets/793da5e3-cc68-4685-8ddf-7410ab186367" />
+
 ## Module
 
 | Kategorie | Modul | Werkzeug dahinter |
