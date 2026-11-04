@@ -49,11 +49,18 @@ Module, deren Werkzeug nicht installiert ist, blendet FAST automatisch aus.
 
 ## Installation
 
+Empfohlen ist das RPM-Paket. Damit erscheint FAST mit Icon im App-Raster und
+als installierte App in GNOME Software, und `dnf` kann es sauber
+aktualisieren und entfernen:
+
 ```bash
 git clone git@github.com:mezzaniin/fast-fedora.git
 cd fast-fedora
-sudo ./install.sh
+./build-rpm.sh                                  # baut nach ./dist/ (ohne root)
+sudo dnf install ./dist/fast-fedora-*.noarch.rpm
 ```
+
+Alternativ ohne Paket: `sudo ./install.sh`
 
 Danach findest du **FAST Systemverwaltung** im App-Menü. Im Terminal startest du
 es mit `fast`. Ein Modul lässt sich auch direkt öffnen, ähnlich wie
@@ -69,7 +76,7 @@ Ohne Installation läuft FAST auch direkt aus dem Quellordner: `./bin/fast`.
 Root-Aktionen fragen dann allerdings jedes Mal nach dem Passwort, weil die
 polkit-Regel fehlt.
 
-Deinstallieren: `sudo ./install.sh --uninstall`
+Deinstallieren: `sudo dnf remove fast-fedora` (bzw. `sudo ./install.sh --uninstall`)
 
 ## Wie Root-Rechte funktionieren
 
