@@ -37,7 +37,7 @@ install -Dm0644 data/de.pattiit.Fast.desktop %{buildroot}%{_datadir}/application
 install -Dm0644 data/de.pattiit.Fast.metainfo.xml %{buildroot}%{_metainfodir}/de.pattiit.Fast.metainfo.xml
 install -Dm0644 data/icons/de.pattiit.Fast.svg %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/de.pattiit.Fast.svg
 install -Dm0644 data/icons/de.pattiit.Fast-symbolic.svg %{buildroot}%{_datadir}/icons/hicolor/symbolic/apps/de.pattiit.Fast-symbolic.svg
-%py_byte_compile %{python3} %{buildroot}%{_datadir}/fast/fast
+python3 -m compileall -q -d %{_datadir}/fast/fast %{buildroot}%{_datadir}/fast/fast
 
 %check
 desktop-file-validate %{buildroot}%{_datadir}/applications/de.pattiit.Fast.desktop
