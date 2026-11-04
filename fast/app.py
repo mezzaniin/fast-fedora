@@ -221,11 +221,12 @@ class App(Adw.Application):
         self.add_action(about)
 
     def do_activate(self):
+        Gtk.Window.set_default_icon_name(APP_ID)
         win = self.props.active_window or Window(self, self.start_module)
         win.present()
 
     def _about(self, *_):
-        Adw.AboutDialog(application_name="FAST", application_icon="preferences-system",
+        Adw.AboutDialog(application_name="FAST", application_icon="de.pattiit.Fast",
                         version=__version__, developer_name="Raphael-Leon Patti",
                         comments="Fedora Administration & Setup Tool – "
                                  "Systemverwaltung im Stil von YaST",

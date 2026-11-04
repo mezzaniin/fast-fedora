@@ -1,5 +1,7 @@
 #!/bin/bash
-# Installiert FAST systemweit (braucht root).  Deinstallieren: sudo ./install.sh --uninstall
+# Installiert FAST direkt aus dem Quellordner (braucht root).
+# Empfohlen ist stattdessen das RPM (./build-rpm.sh), dann erscheint FAST auch in GNOME Software.
+#  Deinstallieren: sudo ./install.sh --uninstall
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
 
@@ -15,7 +17,10 @@ if [[ ${1:-} == "--uninstall" ]]; then
     rm -rf "$SHARE" "$LIBEXEC"
     rm -f "$PREFIX/bin/fast" \
           "$PREFIX/share/polkit-1/actions/de.pattiit.fast.policy" \
-          "$PREFIX/share/applications/de.pattiit.Fast.desktop"
+          "$PREFIX/share/applications/de.pattiit.Fast.desktop" \
+          "$PREFIX/share/metainfo/de.pattiit.Fast.metainfo.xml" \
+          "$PREFIX/share/icons/hicolor/scalable/apps/de.pattiit.Fast.svg" \
+          "$PREFIX/share/icons/hicolor/symbolic/apps/de.pattiit.Fast-symbolic.svg"
     echo "FAST wurde entfernt."
     exit 0
 fi
@@ -32,6 +37,10 @@ install -m 0755 bin/fast "$PREFIX/bin/fast"
 install -m 0755 -o root -g root helper/fast-helper "$LIBEXEC/fast-helper"
 install -m 0644 data/de.pattiit.fast.policy "$PREFIX/share/polkit-1/actions/"
 install -m 0644 data/de.pattiit.Fast.desktop "$PREFIX/share/applications/"
+install -Dm0644 data/de.pattiit.Fast.metainfo.xml "$PREFIX/share/metainfo/de.pattiit.Fast.metainfo.xml"
+install -Dm0644 data/icons/de.pattiit.Fast.svg "$PREFIX/share/icons/hicolor/scalable/apps/de.pattiit.Fast.svg"
+install -Dm0644 data/icons/de.pattiit.Fast-symbolic.svg "$PREFIX/share/icons/hicolor/symbolic/apps/de.pattiit.Fast-symbolic.svg"
+gtk-update-icon-cache -qtf "$PREFIX/share/icons/hicolor" 2>/dev/null || true
 command -v restorecon >/dev/null && restorecon -R "$SHARE" "$LIBEXEC" "$PREFIX/bin/fast" || true
 command -v update-desktop-database >/dev/null && update-desktop-database -q || true
 

@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>de.pattiit.Fast</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>FAST Systemverwaltung</name>
+  <summary>Fedora-System einrichten und verwalten – wie YaST</summary>
+  <developer id="de.pattiit">
+    <name>Raphael-Leon Patti</name>
+  </developer>
+  <description>
+    <p>
+      FAST (Fedora Administration &amp; Setup Tool) bündelt alle wichtigen
+      Systemeinstellungen in einem Kontrollzentrum im Stil von YaST.
+    </p>
+    <ul>
+      <li>Software: Pakete, Paketgruppen, Repositories, Updates, Flatpak</li>
+      <li>System: Dienste, Protokolle, Bootloader, Zeit, Sprache, sysctl, Snapshots</li>
+      <li>Hardware: Datenträger, fstab, Drucker, Sound, Hardware-Informationen</li>
+      <li>Netzwerk: Verbindungen, WLAN, VPN, Hosts, SSH-Server</li>
+      <li>Sicherheit: Firewall, Benutzer, Gruppen, SELinux, Sicherheitsüberblick</li>
+      <li>Virtualisierung: libvirt-VMs und Podman-Container</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">de.pattiit.Fast.desktop</launchable>
+  <url type="homepage">https://github.com/mezzaniin/fast-fedora</url>
+  <url type="bugtracker">https://github.com/mezzaniin/fast-fedora/issues</url>
+  <categories>
+    <category>System</category>
+    <category>Settings</category>
+  </categories>
+  <keywords>
+    <keyword>yast</keyword>
+    <keyword>admin</keyword>
+    <keyword>systemverwaltung</keyword>
+  </keywords>
+  <content_rating type="oars-1.1"/>
+  <requires>
+    <display_length compare="ge">720</display_length>
+  </requires>
+  <releases>
+    <release version="0.1.0" date="2026-11-04">
+      <description><p>Erste Version mit 31 Modulen.</p></description>
+    </release>
+  </releases>
+</component>
