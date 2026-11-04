@@ -1,0 +1,129 @@
+#!/usr/bin/python3 -I
+"""FAST-Helper: führt freigegebene Verwaltungsbefehle mit Root-Rechten aus.
+
+Wird ausschließlich über pkexec gestartet:
+  fast-helper run <programm> [argumente ...]
+  fast-helper write <pfad>           (Inhalt über stdin, legt <pfad>.fast-bak an)
+"""
+import os
+import shutil
+import sys
+import tempfile
+
+SAFE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+ALLOWED = {
+    # Software
+    "dnf5", "dnf", "rpm", "flatpak", "fwupdmgr",
+    # System
+    "systemctl", "journalctl", "hostnamectl", "timedatectl", "localectl",
+    "grubby", "grub2-mkconfig", "grub2-editenv", "sysctl", "tuned-adm",
+    "snapper", "kernel-install", "dmesg", "cat", "ls", "loginctl",
+    # Hardware
+    "smartctl", "mount", "umount", "swapon", "swapoff", "lpadmin",
+    "cupsenable", "cupsdisable", "cupsaccept", "cupsreject", "lpstat",
+    # Netzwerk / Sicherheit
+    "nmcli", "firewall-cmd", "setenforce", "setsebool", "getsebool",
+    "semanage", "restorecon", "sshd", "ausearch",
+    # Benutzer
+    "useradd", "userdel", "usermod", "groupadd", "groupdel", "groupmod",
+    "gpasswd", "chpasswd", "chage", "passwd", "faillock",
+    # Virtualisierung / Container
+    "virsh", "podman",
+}
+
+WRITABLE = {
+    "/etc/hosts",
+    "/etc/fstab",
+    "/etc/default/grub",
+    "/etc/selinux/config",
+    "/etc/sysctl.d/90-fast.conf",
+    "/etc/ssh/sshd_config.d/50-fast.conf",
+    "/etc/dnf/dnf.conf",
+    "/etc/systemd/journald.conf.d/50-fast.conf",
+    "/etc/systemd/logind.conf.d/50-fast.conf",
+    "/etc/environment",
+    "/etc/motd",
+    "/etc/issue",
+}
+
+MAX_WRITE = 1024 * 1024
+
+
+def die(msg, code=2):
+    print(f"fast-helper: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def cmd_run(args):
+    if not args:
+        die("kein Programm angegeben")
+    prog = args[0]
+    if "/" in prog or prog not in ALLOWED:
+        die(f"Programm nicht freigegeben: {prog}")
+    path = shutil.which(prog, path=SAFE_PATH)
+    if not path:
+        die(f"Programm nicht gefunden: {prog}", 127)
+    env = {
+        "PATH": SAFE_PATH,
+        "LC_ALL": "C.UTF-8",
+        "LANG": "C.UTF-8",
+        "HOME": "/root",
+        "SYSTEMD_COLORS": "0",
+        "SYSTEMD_PAGER": "",
+        "NO_COLOR": "1",
+        "TERM": "dumb",
+    }
+    os.execve(path, [prog, *args[1:]], env)
+
+
+def cmd_write(args):
+    if len(args) != 1:
+        die("Aufruf: write <pfad>")
+    path = os.path.normpath(args[0])
+    if path not in WRITABLE:
+        die(f"Datei nicht freigegeben: {path}")
+    data = sys.stdin.buffer.read(MAX_WRITE + 1)
+    if len(data) > MAX_WRITE:
+        die("Inhalt zu groß")
+    directory = os.path.dirname(path)
+    os.makedirs(directory, mode=0o755, exist_ok=True)
+    mode = 0o644
+    if os.path.exists(path):
+        st = os.stat(path)
+        mode = st.st_mode & 0o7777
+        shutil.copy2(path, path + ".fast-bak")
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".fast-")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, mode)
+        os.rename(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+    restorecon = shutil.which("restorecon", path=SAFE_PATH)
+    if restorecon:
+        os.spawnv(os.P_WAIT, restorecon, ["restorecon", path])
+    print(f"geschrieben: {path}")
+
+
+def main():
+    if os.geteuid() != 0:
+        die("muss als root laufen (über pkexec)")
+    if len(sys.argv) < 2:
+        die("Aufruf: fast-helper run|write ...")
+    action, rest = sys.argv[1], sys.argv[2:]
+    if action == "run":
+        cmd_run(rest)
+    elif action == "write":
+        cmd_write(rest)
+    else:
+        die(f"unbekannte Aktion: {action}")
+
+
+if __name__ == "__main__":
+    main()

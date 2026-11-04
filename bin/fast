@@ -1,0 +1,14 @@
+#!/usr/bin/python3
+"""Startskript für FAST (funktioniert aus dem Quellordner und installiert)."""
+import os
+import sys
+
+here = os.path.dirname(os.path.realpath(__file__))
+for candidate in (os.path.join(here, ".."), "/usr/share/fast"):
+    if os.path.isdir(os.path.join(candidate, "fast")):
+        sys.path.insert(0, os.path.abspath(candidate))
+        break
+
+from fast.app import main  # noqa: E402
+
+sys.exit(main())
